@@ -1,0 +1,102 @@
+{
+  "entities": {
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Catatan absensi karyawan harian mencakup jam masuk, pulang, lembur, dan lokasi.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifier unik catatan absensi"
+        },
+        "userId": {
+          "type": "string",
+          "description": "ID pengguna pemilik absensi"
+        },
+        "userEmail": {
+          "type": "string",
+          "description": "Email pengguna"
+        },
+        "tanggal": {
+          "type": "string",
+          "description": "Tanggal absensi format YYYY-MM-DD"
+        },
+        "masuk": {
+          "type": "string",
+          "description": "Waktu absen masuk HH:MM:SS"
+        },
+        "pulang": {
+          "type": "string",
+          "description": "Waktu absen pulang HH:MM:SS"
+        },
+        "lemburMulai": {
+          "type": "string",
+          "description": "Waktu mulai lembur HH:MM"
+        },
+        "lemburSelesai": {
+          "type": "string",
+          "description": "Waktu selesai lembur HH:MM"
+        },
+        "lemburAlasan": {
+          "type": "string",
+          "description": "Keterangan atau alasan lembur"
+        },
+        "lokasiMasuk": {
+          "type": "string",
+          "description": "Nama lokasi dan koordinat/akurasi saat absen masuk"
+        },
+        "lokasiPulang": {
+          "type": "string",
+          "description": "Nama lokasi dan koordinat/akurasi saat absen pulang"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp ISO waktu pembaruan terakhir"
+        }
+      },
+      "required": ["id", "userId", "tanggal"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Pengaturan jam kerja shift dan preferensi pengguna.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "ID pengguna pemilik pengaturan"
+        },
+        "jamMasuk": {
+          "type": "string",
+          "description": "Jam masuk kerja default"
+        },
+        "jamPulang": {
+          "type": "string",
+          "description": "Jam pulang kerja default"
+        },
+        "toleransi": {
+          "type": "number",
+          "description": "Toleransi keterlambatan dalam menit"
+        },
+        "namaPerusahaan": {
+          "type": "string",
+          "description": "Nama perusahaan atau instansi"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp ISO waktu pembaruan terakhir"
+        }
+      },
+      "required": ["userId", "jamMasuk", "jamPulang", "toleransi"]
+    }
+  },
+  "firestore": {
+    "/attendances/{attendanceId}": {
+      "schema": "AttendanceRecord",
+      "description": "Koleksi data absensi harian karyawan terhubung ke database Firestore gratis"
+    },
+    "/settings/{userId}": {
+      "schema": "UserSettings",
+      "description": "Pengaturan profil dan aturan jam kerja per pengguna"
+    }
+  }
+}

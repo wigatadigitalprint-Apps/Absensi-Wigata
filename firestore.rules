@@ -1,0 +1,54 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email == 'wigatadigitalprint@gmail.com' && request.auth.token.email_verified == true;
+    }
+
+    // Health check / connection test
+    match /test/{docId} {
+      allow read: if true;
+    }
+
+    // Attendance collection
+    match /attendances/{attendanceId} {
+      allow get, list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn()
+        && isValidId(attendanceId)
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasAll(['id', 'userId', 'tanggal'])
+        && request.resource.data.id is string && request.resource.data.id.size() <= 128
+        && request.resource.data.tanggal is string && request.resource.data.tanggal.size() <= 20;
+
+      allow update: if isSignedIn()
+        && isValidId(attendanceId)
+        && (resource.data.userId == request.auth.uid || isAdmin())
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.tanggal == resource.data.tanggal;
+
+      allow delete: if isSignedIn()
+        && isValidId(attendanceId)
+        && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // User settings
+    match /settings/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+  }
+}
