@@ -2,5 +2,7 @@
   "name": "Absensi Pro",
   "description": "Aplikasi absensi online dan pencatatan lembur karyawan terhubung ke database cloud gratis.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

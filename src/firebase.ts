@@ -113,6 +113,8 @@ export interface AttendanceRecord {
   userEmail?: string;
   userName?: string;
   userPhoto?: string;
+  nik?: string;
+  jabatan?: string;
   tanggal: string; // YYYY-MM-DD
   masuk: string | null; // HH:MM:SS
   pulang: string | null; // HH:MM:SS
@@ -129,6 +131,16 @@ export interface UserSettings {
   jamPulang: string;
   toleransi: number;
   namaPerusahaan: string;
+  updatedAt?: string;
+}
+
+export interface UserProfile {
+  userId: string;
+  namaLengkap: string;
+  nik: string;
+  noHp: string;
+  jabatan: string;
+  alamatLokasi: string;
   updatedAt?: string;
 }
 
@@ -232,6 +244,41 @@ export async function saveSettingsToCloud(userId: string, settings: UserSettings
   try {
     await setDoc(doc(db, 'settings', userId), {
       ...settings,
+      userId,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, docPath);
+  }
+}
+
+export function subscribeToUserProfile(
+  userId: string,
+  onData: (profile: UserProfile | null) => void,
+  onError: (error: unknown) => void
+): Unsubscribe {
+  const docPath = `profiles/${userId}`;
+  return onSnapshot(
+    doc(db, 'profiles', userId),
+    (snapshot) => {
+      if (snapshot.exists()) {
+        onData(snapshot.data() as UserProfile);
+      } else {
+        onData(null);
+      }
+    },
+    (error) => {
+      onError(error);
+      handleFirestoreError(error, OperationType.GET, docPath);
+    }
+  );
+}
+
+export async function saveUserProfileToCloud(userId: string, profile: UserProfile): Promise<void> {
+  const docPath = `profiles/${userId}`;
+  try {
+    await setDoc(doc(db, 'profiles', userId), {
+      ...profile,
       userId,
       updatedAt: new Date().toISOString(),
     });

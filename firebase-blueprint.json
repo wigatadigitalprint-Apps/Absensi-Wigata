@@ -87,6 +87,42 @@
         }
       },
       "required": ["userId", "jamMasuk", "jamPulang", "toleransi"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Data diri lengkap karyawan dan lokasi kerja",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "ID pengguna pemilik profil"
+        },
+        "namaLengkap": {
+          "type": "string",
+          "description": "Nama lengkap karyawan"
+        },
+        "nik": {
+          "type": "string",
+          "description": "Nomor induk karyawan / NIK"
+        },
+        "noHp": {
+          "type": "string",
+          "description": "Nomor WhatsApp atau HP karyawan"
+        },
+        "jabatan": {
+          "type": "string",
+          "description": "Posisi atau bagian karyawan di percetakan"
+        },
+        "alamatLokasi": {
+          "type": "string",
+          "description": "Alamat atau lokasi penempatan kerja karyawan"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp pembaruan profil"
+        }
+      },
+      "required": ["userId", "namaLengkap"]
     }
   },
   "firestore": {
@@ -97,6 +133,10 @@
     "/settings/{userId}": {
       "schema": "UserSettings",
       "description": "Pengaturan profil dan aturan jam kerja per pengguna"
+    },
+    "/profiles/{userId}": {
+      "schema": "UserProfile",
+      "description": "Data diri karyawan dan alamat lokasi penempatan kerja"
     }
   }
 }

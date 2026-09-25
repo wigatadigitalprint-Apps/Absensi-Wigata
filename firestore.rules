@@ -41,14 +41,21 @@ service cloud.firestore {
         && request.resource.data.id == resource.data.id
         && request.resource.data.tanggal == resource.data.tanggal;
 
+      // HANYA ADMIN YANG DAPAT MENGHAPUS ABSENSI, KARYAWAN TIDAK BISA
       allow delete: if isSignedIn()
         && isValidId(attendanceId)
-        && (resource.data.userId == request.auth.uid || isAdmin());
+        && isAdmin();
     }
 
     // User settings
     match /settings/{userId} {
-      allow read, write: if isSignedIn() && request.auth.uid == userId;
+      allow read, write: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+    }
+
+    // Employee Profiles
+    match /profiles/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (request.auth.uid == userId || isAdmin());
     }
   }
 }
