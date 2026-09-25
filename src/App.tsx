@@ -212,11 +212,22 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       if (user) {
+        // Load cached records for this user immediately if available
+        try {
+          const saved = localStorage.getItem(LOCAL_STORAGE_KEY + '_' + user.uid);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setRecords(parsed);
+            }
+          }
+        } catch {}
+
         // If profile doesn't have name yet, use Google name
         setUserProfile((prev) => ({
           ...prev,
           userId: user.uid,
-          namaLengkap: prev.namaLengkap || user.displayName || '',
+          namaLengkap: prev.namaLengkap || user.displayName || user.email?.split('@')[0] || '',
         }));
       }
     });
@@ -231,10 +242,10 @@ export default function App() {
     const unsubAttendances = subscribeToUserAttendances(
       currentUser.uid,
       (cloudRecords) => {
-        if (cloudRecords && cloudRecords.length > 0) {
+        if (cloudRecords) {
           setRecords(cloudRecords);
           try {
-            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(cloudRecords));
+            localStorage.setItem(LOCAL_STORAGE_KEY + '_' + currentUser.uid, JSON.stringify(cloudRecords));
           } catch {}
         }
       },
@@ -248,7 +259,7 @@ export default function App() {
         if (cloudProfile) {
           setUserProfile(cloudProfile);
           try {
-            localStorage.setItem(PROFILE_KEY, JSON.stringify(cloudProfile));
+            localStorage.setItem(PROFILE_KEY + '_' + currentUser.uid, JSON.stringify(cloudProfile));
           } catch {}
         }
       },
@@ -440,6 +451,14 @@ export default function App() {
 
   // Handlers
   const handleAbsenMasuk = async () => {
+    if (!currentUser) {
+      showToast('Wajib login Akun Google dahulu agar data tersimpan di Cloud!');
+      try {
+        await handleGoogleLogin();
+      } catch {}
+      return;
+    }
+
     if (todayRecord?.masuk) {
       showToast('Anda sudah melakukan absen masuk hari ini.');
       return;
@@ -447,14 +466,15 @@ export default function App() {
 
     const lokasiSaatIni = userProfile.alamatLokasi?.trim() || lokasiPilihanDefault[0];
     const jamSekarang = getHHMMSS();
-    const namaKaryawan = userProfile.namaLengkap.trim() || currentUser?.displayName || 'Karyawan Wigata';
+    const namaKaryawan = userProfile.namaLengkap.trim() || currentUser.displayName || currentUser.email?.split('@')[0] || 'Karyawan Wigata';
+    const cleanId = `${currentUser.uid}_${todayDateStr}`;
 
     const newRecord: AttendanceRecord = {
-      id: todayRecord ? todayRecord.id : `wgt-${todayDateStr}-${Date.now().toString().slice(-4)}`,
-      userId: currentUser?.uid || 'guest-' + Date.now().toString().slice(-4),
-      userEmail: currentUser?.email || '',
+      id: cleanId,
+      userId: currentUser.uid,
+      userEmail: currentUser.email || '',
       userName: namaKaryawan,
-      userPhoto: currentUser?.photoURL || '',
+      userPhoto: currentUser.photoURL || '',
       nik: userProfile.nik || '',
       jabatan: userProfile.jabatan || '',
       tanggal: todayDateStr,
@@ -472,16 +492,23 @@ export default function App() {
     setCelebrationModal({ type: 'masuk', time: jamSekarang.slice(0, 5) });
     showToast(`✓ Absen masuk tercatat ${jamSekarang.slice(0, 5)} WIB`);
 
-    if (currentUser) {
-      try {
-        await saveAttendanceToCloud(newRecord, currentUser.uid, currentUser.email || '');
-      } catch (err) {
-        console.error('Error saving to cloud:', err);
-      }
+    try {
+      await saveAttendanceToCloud(newRecord, currentUser.uid, currentUser.email || '');
+      showToast(`✓ Data tersimpan aman di Cloud Database!`);
+    } catch (err) {
+      console.error('Error saving to cloud:', err);
     }
   };
 
   const handleAbsenPulang = async () => {
+    if (!currentUser) {
+      showToast('Wajib login Akun Google dahulu!');
+      try {
+        await handleGoogleLogin();
+      } catch {}
+      return;
+    }
+
     if (!todayRecord?.masuk) {
       showToast('Harap absen masuk terlebih dahulu sebelum absen pulang.');
       return;
@@ -493,9 +520,14 @@ export default function App() {
 
     const lokasiSaatIni = userProfile.alamatLokasi?.trim() || lokasiPilihanDefault[0];
     const jamSekarang = getHHMMSS();
+    const cleanId = todayRecord.id || `${currentUser.uid}_${todayDateStr}`;
+
     const updated: AttendanceRecord = {
       ...todayRecord,
-      userName: userProfile.namaLengkap.trim() || todayRecord.userName || 'Karyawan Wigata',
+      id: cleanId,
+      userId: currentUser.uid,
+      userEmail: currentUser.email || todayRecord.userEmail || '',
+      userName: userProfile.namaLengkap.trim() || todayRecord.userName || currentUser.displayName || 'Karyawan Wigata',
       nik: userProfile.nik || todayRecord.nik || '',
       jabatan: userProfile.jabatan || todayRecord.jabatan || '',
       pulang: jamSekarang,
@@ -507,16 +539,23 @@ export default function App() {
     setCelebrationModal({ type: 'pulang', time: jamSekarang.slice(0, 5) });
     showToast(`✓ Absen pulang tercatat ${jamSekarang.slice(0, 5)} WIB`);
 
-    if (currentUser) {
-      try {
-        await saveAttendanceToCloud(updated, currentUser.uid, currentUser.email || '');
-      } catch (err) {
-        console.error('Error saving to cloud:', err);
-      }
+    try {
+      await saveAttendanceToCloud(updated, currentUser.uid, currentUser.email || '');
+      showToast(`✓ Data pulang tersimpan aman di Cloud!`);
+    } catch (err) {
+      console.error('Error saving to cloud:', err);
     }
   };
 
   const handleAjukanLembur = async () => {
+    if (!currentUser) {
+      showToast('Wajib login Akun Google dahulu!');
+      try {
+        await handleGoogleLogin();
+      } catch {}
+      return;
+    }
+
     if (!todayRecord) {
       showToast('Silakan absen masuk hari ini terlebih dahulu.');
       return;
@@ -820,6 +859,59 @@ export default function App() {
           {activeTab === 'beranda' && (
             <div className="space-y-4 pt-1">
               
+              {/* Google Login Status & Account Card */}
+              {!currentUser ? (
+                <div className="rounded-[24px] bg-gradient-to-br from-indigo-900 via-blue-900 to-indigo-950 text-white p-4 shadow-lg border border-indigo-500/30">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-2xl bg-white text-slate-900 grid place-items-center text-[18px] font-black shrink-0 shadow-md">
+                      G
+                    </div>
+                    <div>
+                      <p className="text-[13px] font-black text-white leading-tight">Masuk dengan Akun Google</p>
+                      <p className="text-[10px] text-indigo-200 mt-0.5 leading-snug">
+                        Wajib masuk agar data absen masuk & pulang Anda tersimpan di Cloud dan tidak hilang saat aplikasi ditutup.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleGoogleLogin}
+                    className="mt-3 w-full h-[46px] rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-black text-[12px] flex items-center justify-center gap-2 shadow-md active:scale-[0.98] transition"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                    </svg>
+                    <span>Masuk Akun Google Sekarang</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="rounded-[18px] bg-emerald-50 border border-emerald-200 px-3.5 py-2.5 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="h-8 w-8 rounded-full bg-emerald-600 text-white grid place-items-center text-[12px] font-black shrink-0 overflow-hidden shadow-sm">
+                      {currentUser.photoURL ? (
+                        <img src={currentUser.photoURL} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        (currentUser.displayName?.[0] || currentUser.email?.[0] || 'K').toUpperCase()
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-[12px] font-bold text-emerald-950 truncate">
+                        {currentUser.displayName || userProfile.namaLengkap || 'Karyawan'}
+                      </p>
+                      <p className="text-[10px] text-emerald-700 truncate">{currentUser.email} • Cloud Aktif</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleGoogleLogout}
+                    className="text-[10px] font-bold text-slate-500 hover:text-rose-600 bg-white border border-slate-200 px-2 py-1 rounded-lg shrink-0 active:scale-95 transition"
+                  >
+                    Ganti Akun
+                  </button>
+                </div>
+              )}
+
               {/* Employee Active Location Badge */}
               <div className="rounded-[18px] bg-white border border-slate-200 p-3 shadow-sm flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2.5 min-w-0">
