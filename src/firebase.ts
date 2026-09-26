@@ -141,6 +141,8 @@ export interface UserProfile {
   noHp: string;
   jabatan: string;
   alamatLokasi: string;
+  userEmail?: string;
+  userPhoto?: string;
   updatedAt?: string;
 }
 
@@ -286,3 +288,26 @@ export async function saveUserProfileToCloud(userId: string, profile: UserProfil
     handleFirestoreError(error, OperationType.WRITE, docPath);
   }
 }
+
+export function subscribeToAllProfiles(
+  onData: (profiles: UserProfile[]) => void,
+  onError: (error: unknown) => void
+): Unsubscribe {
+  const collPath = 'profiles';
+  const q = query(collection(db, collPath));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list: UserProfile[] = [];
+      snapshot.forEach((d) => {
+        list.push(d.data() as UserProfile);
+      });
+      onData(list);
+    },
+    (error) => {
+      onError(error);
+      handleFirestoreError(error, OperationType.LIST, collPath);
+    }
+  );
+}
+

@@ -15,6 +15,7 @@ import {
   logoutUser, 
   subscribeToUserAttendances, 
   subscribeToAllAttendances,
+  subscribeToAllProfiles,
   subscribeToUserSettings, 
   subscribeToUserProfile,
   saveAttendanceToCloud, 
@@ -177,7 +178,7 @@ export default function App() {
   const [allRecords, setAllRecords] = useState<AttendanceRecord[]>([]);
 
   // Filter & Search
-  const [filterRentang, setFilterRentang] = useState<'minggu' | 'bulan' | 'semua'>('semua');
+  const [filterRentang, setFilterRentang] = useState<'hari_ini' | 'minggu' | 'bulan' | 'semua'>('semua');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filterJabatan, setFilterJabatan] = useState<string>('semua');
 
@@ -193,7 +194,7 @@ export default function App() {
   const [adminUsername, setAdminUsername] = useState<string>('');
   const [adminPassword, setAdminPassword] = useState<string>('');
 
-  // Overtime Form
+  // Overtime Form (Khusus Karyawan)
   const [lemburMulai, setLemburMulai] = useState<string>('18:00');
   const [lemburSelesai, setLemburSelesai] = useState<string>('20:00');
   const [lemburAlasan, setLemburAlasan] = useState<string>('');
@@ -201,6 +202,16 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const showToast = (msg: string) => setToastMessage(msg);
+
+  // Effective Tab: Admin must only see Rekapan Data Absen, Rekapan Data Lembur, or Pengaturan Admin (never 'beranda')
+  const effectiveTab = isAdmin && activeTab === 'beranda' ? 'riwayat' : activeTab;
+
+  // Ensure Admin is always on 'riwayat' (Rekap Absen) or 'lembur' (Rekap Lembur), never on 'beranda'
+  useEffect(() => {
+    if (isAdmin && activeTab === 'beranda') {
+      setActiveTab('riwayat');
+    }
+  }, [isAdmin, activeTab]);
 
   // 1. Test Firestore Connection on Boot
   useEffect(() => {
@@ -351,15 +362,17 @@ export default function App() {
     [lemburMulai, lemburSelesai]
   );
 
-  // Active records: if Admin and adminViewAll is ON, display all employee records
-  const activeRecords = isAdmin && adminViewAll ? allRecords : records;
+  // Active records: if Admin, directly display all employee records from Cloud!
+  const activeRecords = isAdmin ? allRecords : records;
 
   // Filtered records for History
   const filteredRecords = useMemo(() => {
     let list = [...activeRecords];
     const now = new Date();
 
-    if (filterRentang === 'minggu') {
+    if (filterRentang === 'hari_ini') {
+      list = list.filter((r) => r.tanggal === todayDateStr);
+    } else if (filterRentang === 'minggu') {
       const batas = new Date();
       batas.setDate(now.getDate() - 7);
       list = list.filter((r) => new Date(r.tanggal) >= batas);
@@ -389,12 +402,23 @@ export default function App() {
     }
 
     return list.sort((a, b) => (a.tanggal < b.tanggal ? 1 : -1));
-  }, [activeRecords, filterRentang, filterJabatan, searchQuery, settings]);
+  }, [activeRecords, filterRentang, filterJabatan, searchQuery, settings, todayDateStr]);
 
-  const overtimeList = useMemo(
-    () => activeRecords.filter((r) => r.lemburMulai && r.lemburSelesai).sort((a, b) => (a.tanggal < b.tanggal ? 1 : -1)),
-    [activeRecords]
-  );
+  const overtimeList = useMemo(() => {
+    let list = activeRecords.filter((r) => r.lemburMulai && r.lemburSelesai);
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(
+        (r) =>
+          r.tanggal.includes(q) ||
+          (r.userName && r.userName.toLowerCase().includes(q)) ||
+          (r.nik && r.nik.toLowerCase().includes(q)) ||
+          (r.jabatan && r.jabatan.toLowerCase().includes(q)) ||
+          (r.lemburAlasan && r.lemburAlasan.toLowerCase().includes(q))
+      );
+    }
+    return list.sort((a, b) => (a.tanggal < b.tanggal ? 1 : -1));
+  }, [activeRecords, searchQuery]);
 
   const statistik = useMemo(() => {
     const now = new Date();
@@ -414,14 +438,16 @@ export default function App() {
     );
 
     const terlambatCount = activeRecords.filter((r) => hitungStatusKehadiran(r, settings) === 'Terlambat').length;
+    const totalMasukHariIni = activeRecords.filter((r) => r.tanggal === todayDateStr && r.masuk).length;
 
     return {
       totalJamBulan,
       totalLembur,
       terlambatCount,
+      totalMasukHariIni,
       totalHari: activeRecords.length,
     };
-  }, [activeRecords, settings]);
+  }, [activeRecords, settings, todayDateStr]);
 
   // GPS Geolocation Detection
   const handleDetectGPS = () => {
@@ -612,6 +638,35 @@ export default function App() {
     }
   };
 
+  // Only Admin can delete or cancel overtime
+  const handleHapusLembur = async (record: AttendanceRecord) => {
+    if (!isAdmin) {
+      showToast('Akses ditolak: Hanya Admin yang dapat menghapus lembur');
+      return;
+    }
+    if (!confirm(`Hapus catatan lembur untuk ${record.userName || 'Karyawan'} tanggal ${record.tanggal}?`)) return;
+
+    const updated: AttendanceRecord = {
+      ...record,
+      lemburMulai: null,
+      lemburSelesai: null,
+      lemburAlasan: '',
+      updatedAt: new Date().toISOString(),
+    };
+
+    setRecords((prev) => prev.map((r) => (r.id === record.id ? updated : r)));
+    setAllRecords((prev) => prev.map((r) => (r.id === record.id ? updated : r)));
+    showToast('✓ Catatan lembur dihapus oleh Admin');
+
+    if (currentUser) {
+      try {
+        await saveAttendanceToCloud(updated, record.userId || currentUser.uid, record.userEmail || '');
+      } catch (err) {
+        console.error('Error updating overtime deletion:', err);
+      }
+    }
+  };
+
   const handleSaveEdit = async () => {
     if (!editingRecord) return;
     setRecords((prev) => prev.map((r) => (r.id === editingRecord.id ? editingRecord : r)));
@@ -656,7 +711,8 @@ export default function App() {
       setAdminUsername('');
       setAdminPassword('');
       setAdminViewAll(true);
-      showToast('✓ Selamat datang Admin Wigata Digitalprint!');
+      setActiveTab('riwayat');
+      showToast('✓ Selamat datang di Panel Rekap Admin Wigata!');
     } else {
       showToast('Username atau password admin salah!');
     }
@@ -666,6 +722,7 @@ export default function App() {
     setIsManualAdmin(false);
     sessionStorage.removeItem(ADMIN_SESSION_KEY);
     setAdminViewAll(false);
+    setActiveTab('beranda');
     showToast('Keluar dari sesi Admin');
   };
 
@@ -762,6 +819,65 @@ export default function App() {
     }
   };
 
+  const handleExportLemburCSV = () => {
+    const headers = [
+      'ID',
+      'Tanggal',
+      'Nama Karyawan',
+      'NIK',
+      'Jabatan / Divisi',
+      'Email Karyawan',
+      'Lembur Mulai',
+      'Lembur Selesai',
+      'Durasi Lembur (Menit)',
+      'Durasi Lembur (Jam)',
+      'Pekerjaan / Alasan Lembur',
+    ];
+
+    const rows = overtimeList.map((r) => {
+      const durLembur = r.lemburMulai && r.lemburSelesai ? hitungSelisihMenit(r.lemburMulai, r.lemburSelesai) : 0;
+      return [
+        r.id,
+        r.tanggal,
+        `"${(r.userName || '').replace(/"/g, '""')}"`,
+        `"${(r.nik || '').replace(/"/g, '""')}"`,
+        `"${(r.jabatan || '').replace(/"/g, '""')}"`,
+        `"${(r.userEmail || '').replace(/"/g, '""')}"`,
+        r.lemburMulai || '',
+        r.lemburSelesai || '',
+        durLembur.toString(),
+        formatDurasi(durLembur),
+        `"${(r.lemburAlasan || '').replace(/"/g, '""')}"`,
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `rekap_lembur_karyawan_wigata_${todayDateStr}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showToast('✓ Rekap lembur CSV berhasil diunduh');
+  };
+
+  const handleSalinLembur = async () => {
+    const text = overtimeList
+      .map((r) => {
+        const dur = r.lemburMulai && r.lemburSelesai ? formatDurasi(hitungSelisihMenit(r.lemburMulai, r.lemburSelesai)) : '-';
+        return `${formatTanggalIndo(r.tanggal)} | ${r.userName || 'Karyawan'} (${r.jabatan || '-'}) | ${r.lemburMulai}-${r.lemburSelesai} (${dur}) | ${r.lemburAlasan || '-'}`;
+      })
+      .join('\n');
+
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('✓ Rekapan lembur disalin ke clipboard');
+    } catch {
+      showToast('Gagal menyalin');
+    }
+  };
+
   const timeParts = currentDate.toLocaleTimeString('id-ID', { hour12: false }).split(':');
   const greeting =
     currentDate.getHours() < 11
@@ -805,19 +921,35 @@ export default function App() {
         <div className="px-5 pt-1 pb-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-indigo-700 via-blue-600 to-indigo-900 text-white grid place-items-center font-black text-[15px] shadow-md shrink-0">
-                W
+              <div className={`h-10 w-10 rounded-2xl ${isAdmin ? 'bg-gradient-to-br from-amber-500 via-amber-600 to-amber-700 text-slate-950 font-black' : 'bg-gradient-to-br from-indigo-700 via-blue-600 to-indigo-900 text-white font-black'} grid place-items-center text-[15px] shadow-md shrink-0`}>
+                {isAdmin ? '👑' : 'W'}
               </div>
               <div className="min-w-0">
-                <p className="text-[10px] font-bold tracking-wider text-indigo-600 uppercase leading-none">
-                  {NAMA_APLIKASI}
-                </p>
-                <p className="text-[14px] font-black leading-tight mt-0.5 tracking-tight truncate max-w-[190px]">
-                  {userProfile.namaLengkap.trim() || currentUser?.displayName || 'Karyawan Percetakan'}
-                </p>
-                <p className="text-[10px] text-slate-500 truncate max-w-[190px]">
-                  {userProfile.jabatan || 'Operator Cetak'} {userProfile.nik ? `• ${userProfile.nik}` : ''}
-                </p>
+                {isAdmin ? (
+                  <>
+                    <p className="text-[10px] font-bold tracking-wider text-amber-600 uppercase leading-none">
+                      PANEL ADMIN WIGATA
+                    </p>
+                    <p className="text-[14px] font-black leading-tight mt-0.5 tracking-tight truncate max-w-[190px]">
+                      {currentUser?.email || 'Admin Rekap Absen & Lembur'}
+                    </p>
+                    <p className="text-[10px] text-slate-500 truncate max-w-[190px]">
+                      Rekap Kehadiran Seluruh Karyawan
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[10px] font-bold tracking-wider text-indigo-600 uppercase leading-none">
+                      {NAMA_APLIKASI}
+                    </p>
+                    <p className="text-[14px] font-black leading-tight mt-0.5 tracking-tight truncate max-w-[190px]">
+                      {userProfile.namaLengkap.trim() || currentUser?.displayName || 'Karyawan Percetakan'}
+                    </p>
+                    <p className="text-[10px] text-slate-500 truncate max-w-[190px]">
+                      {userProfile.jabatan || 'Operator Cetak'} {userProfile.nik ? `• ${userProfile.nik}` : ''}
+                    </p>
+                  </>
+                )}
               </div>
             </div>
 
@@ -835,7 +967,7 @@ export default function App() {
                   className="h-8 px-2.5 rounded-full bg-amber-500 text-slate-950 text-[10px] font-black shadow-sm active:scale-95 transition"
                   title="Klik untuk keluar mode Admin"
                 >
-                  Admin ✓
+                  Keluar Admin
                 </button>
               ) : (
                 <button
@@ -855,8 +987,8 @@ export default function App() {
           className="flex-1 overflow-y-auto px-4 pb-[112px] scrollbar-none"
           style={{ WebkitOverflowScrolling: 'touch' }}
         >
-          {/* TAB 1: BERANDA */}
-          {activeTab === 'beranda' && (
+          {/* TAB 1: BERANDA (Hanya untuk Karyawan: Absen Masuk & Pulang - Admin TIDAK melihat Beranda) */}
+          {effectiveTab === 'beranda' && !isAdmin && (
             <div className="space-y-4 pt-1">
               
               {/* Google Login Status & Account Card */}
@@ -1072,37 +1204,28 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 2: RIWAYAT */}
-          {activeTab === 'riwayat' && (
+          {/* TAB 2: REKAP ABSEN (Untuk Admin: Rekapan Data Absensi Semua Karyawan; Untuk Karyawan: Riwayat Saya) */}
+          {effectiveTab === 'riwayat' && (
             <div className="space-y-4 pt-1">
               
-              {/* Admin Mode Switch Banner */}
+              {/* Header Rekap Absensi */}
               {isAdmin ? (
-                <div className="bg-slate-900 text-white rounded-[22px] p-3 shadow-md border border-slate-800">
+                <div className="bg-slate-900 text-white rounded-[24px] p-4 shadow-md border border-slate-800">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2.5">
-                      <span className="h-8 w-8 rounded-xl bg-amber-400/20 text-amber-400 grid place-items-center text-[15px]">
-                        👑
+                      <span className="h-10 w-10 rounded-2xl bg-amber-400 text-slate-950 grid place-items-center text-[18px] font-black shadow">
+                        📋
                       </span>
                       <div>
-                        <p className="text-[12px] font-black leading-tight">Mode Admin Wigata</p>
+                        <h3 className="text-[14px] font-black leading-tight text-white">Rekapan Data Absen Karyawan</h3>
                         <p className="text-[10px] text-white/60 mt-0.5">
-                          {adminViewAll
-                            ? `Memantau ${allRecords.length} data seluruh karyawan`
-                            : 'Melihat riwayat absensi Anda pribadi'}
+                          Memantau kehadiran {allRecords.length} data absensi masuk & pulang seluruh staf Wigata
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setAdminViewAll(!adminViewAll)}
-                      className={`h-8 px-3 rounded-full text-[11px] font-bold transition-all shadow-sm ${
-                        adminViewAll
-                          ? 'bg-amber-400 text-slate-950 font-black'
-                          : 'bg-white/10 text-white border border-white/20'
-                      }`}
-                    >
-                      {adminViewAll ? '✓ Semua Karyawan' : 'Lihat Semua Karyawan'}
-                    </button>
+                    <span className="px-2.5 py-1 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black shrink-0">
+                      👑 Admin
+                    </span>
                   </div>
                 </div>
               ) : (
@@ -1110,8 +1233,8 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     <span className="text-[14px]">👤</span>
                     <div>
-                      <p className="text-[11px] font-bold">Akun Karyawan (Hanya Lihat)</p>
-                      <p className="text-[10px] text-indigo-700">Karyawan tidak memiliki hak akses menghapus riwayat</p>
+                      <p className="text-[11px] font-bold">Riwayat Kehadiran Anda</p>
+                      <p className="text-[10px] text-indigo-700">Data tersimpan di Cloud Database</p>
                     </div>
                   </div>
                 </div>
@@ -1119,17 +1242,17 @@ export default function App() {
 
               {/* Filter Pills & Search */}
               <div className="flex gap-2 overflow-x-auto scrollbar-none -mx-4 px-4 pb-1">
-                {(['minggu', 'bulan', 'semua'] as const).map((r) => (
+                {(['hari_ini', 'minggu', 'bulan', 'semua'] as const).map((r) => (
                   <button
                     key={r}
                     onClick={() => setFilterRentang(r)}
-                    className={`h-9 px-4 rounded-full text-[12px] font-bold whitespace-nowrap border transition active:scale-[0.98] ${
+                    className={`h-9 px-3.5 rounded-full text-[12px] font-bold whitespace-nowrap border transition active:scale-[0.98] ${
                       filterRentang === r
                         ? 'bg-slate-900 text-white border-slate-900 shadow'
                         : 'bg-white text-slate-600 border-slate-200'
                     }`}
                   >
-                    {r === 'minggu' ? 'Minggu Ini' : r === 'bulan' ? 'Bulan Ini' : 'Semua'}
+                    {r === 'hari_ini' ? 'Hari Ini' : r === 'minggu' ? 'Minggu Ini' : r === 'bulan' ? 'Bulan Ini' : 'Semua'}
                   </button>
                 ))}
                 <div className="relative ml-auto">
@@ -1137,17 +1260,38 @@ export default function App() {
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Cari nama/tgl..."
-                    className="h-9 w-[130px] rounded-full border border-slate-200 bg-white pl-8 pr-3 text-[12px] focus:outline-none focus:ring-2 focus:ring-indigo-100"
+                    className="h-9 w-[125px] rounded-full border border-slate-200 bg-white pl-8 pr-3 text-[12px] focus:outline-none focus:ring-2 focus:ring-indigo-100"
                   />
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[12px]">⌕</span>
                 </div>
               </div>
 
+              {/* Filter Divisi Khusus Admin */}
+              {isAdmin && (
+                <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-2xl px-3 py-1.5 shadow-sm">
+                  <span className="text-[11px] font-bold text-slate-500 whitespace-nowrap">Filter Divisi:</span>
+                  <select
+                    value={filterJabatan}
+                    onChange={(e) => setFilterJabatan(e.target.value)}
+                    className="w-full bg-transparent text-[12px] font-semibold text-slate-800 focus:outline-none"
+                  >
+                    <option value="semua">Semua Divisi & Bagian (Seluruh Staf)</option>
+                    {daftarJabatan.map((j) => (
+                      <option key={j} value={j}>{j}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {/* Monthly Stats Cards */}
               <div className="grid grid-cols-3 gap-2">
                 <div className="rounded-[18px] bg-white border border-slate-200 p-3 shadow-sm">
-                  <p className="text-[10px] uppercase font-bold text-slate-400">Total Kerja</p>
-                  <p className="mt-1 text-[15px] font-black">{formatDurasi(statistik.totalJamBulan)}</p>
+                  <p className="text-[10px] uppercase font-bold text-slate-400">
+                    {isAdmin ? 'Masuk Hari Ini' : 'Total Kerja'}
+                  </p>
+                  <p className="mt-1 text-[15px] font-black">
+                    {isAdmin ? `${statistik.totalMasukHariIni} orang` : formatDurasi(statistik.totalJamBulan)}
+                  </p>
                 </div>
                 <div className="rounded-[18px] bg-white border border-slate-200 p-3 shadow-sm">
                   <p className="text-[10px] uppercase font-bold text-slate-400">Total Lembur</p>
@@ -1285,329 +1429,541 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 3: LEMBUR */}
-          {activeTab === 'lembur' && (
+          {/* TAB 3: LEMBUR (Untuk Admin: Rekapan Data Lembur Karyawan; Untuk Karyawan: Form Pengajuan & Riwayat Lembur) */}
+          {effectiveTab === 'lembur' && (
             <div className="space-y-4 pt-1">
-              <div className="rounded-[26px] bg-white border border-slate-200 shadow-sm p-5">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-[14px] font-bold">Form Pengajuan Lembur</h3>
-                  <span className="text-[11px] px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 font-bold">
-                    Durasi: {formatDurasi(durasiLemburInput)}
-                  </span>
-                </div>
-
-                <div className="mt-5 space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="block">
-                      <span className="text-[12px] font-semibold text-slate-700">Mulai Lembur</span>
-                      <input
-                        type="time"
-                        value={lemburMulai}
-                        onChange={(e) => setLemburMulai(e.target.value)}
-                        className="mt-2 w-full h-[56px] rounded-2xl border border-slate-200 bg-slate-50 px-4 text-[16px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                      />
-                    </label>
-                    <label className="block">
-                      <span className="text-[12px] font-semibold text-slate-700">Selesai Lembur</span>
-                      <input
-                        type="time"
-                        value={lemburSelesai}
-                        onChange={(e) => setLemburSelesai(e.target.value)}
-                        className="mt-2 w-full h-[56px] rounded-2xl border border-slate-200 bg-slate-50 px-4 text-[16px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                      />
-                    </label>
-                  </div>
-
-                  <div className="rounded-2xl bg-indigo-50 border border-indigo-100 px-4 py-3 flex items-center justify-between">
-                    <span className="text-[12px] font-semibold text-indigo-700">Total Durasi Lembur</span>
-                    <span className="text-[14px] font-black text-indigo-900">
-                      {formatDurasi(durasiLemburInput)} ({durasiLemburInput} menit)
-                    </span>
-                  </div>
-
-                  <label className="block">
-                    <span className="text-[12px] font-semibold text-slate-700">Alasan / Pekerjaan Lembur</span>
-                    <input
-                      value={lemburAlasan}
-                      onChange={(e) => setLemburAlasan(e.target.value)}
-                      placeholder="Contoh: Cetak spanduk pilkada pesanan kilat"
-                      className="mt-2 w-full h-[56px] rounded-2xl border border-slate-200 bg-white px-4 text-[14px] focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                    />
-                  </label>
-
-                  <button
-                    onClick={handleAjukanLembur}
-                    className="w-full h-[56px] rounded-2xl bg-slate-900 text-white text-[14px] font-black tracking-wide shadow-lg active:scale-[0.98] transition"
-                  >
-                    Simpan Pengajuan Lembur
-                  </button>
-
-                  {todayRecord?.lemburMulai && (
-                    <div className="rounded-2xl bg-slate-50 border border-slate-200 px-4 py-3 text-[12px] text-slate-600">
-                      Lembur Anda hari ini: <span className="font-bold">{todayRecord.lemburMulai} - {todayRecord.lemburSelesai}</span> ({formatDurasi(hitungSelisihMenit(todayRecord.lemburMulai, todayRecord.lemburSelesai))})
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <h4 className="text-[13px] font-bold px-1">Daftar Lembur Tersimpan</h4>
-                <div className="mt-3 space-y-3">
-                  {overtimeList.map((r) => {
-                    const dur = hitungSelisihMenit(r.lemburMulai, r.lemburSelesai);
-                    return (
-                      <div
-                        key={r.id}
-                        className="rounded-[20px] bg-white border border-slate-200 p-4 flex items-center justify-between"
-                      >
+              {isAdmin ? (
+                /* REKAP LEMBUR KHUSUS ADMIN (Tanpa Form Ajukan Lembur) */
+                <div className="space-y-4">
+                  <div className="rounded-[24px] bg-slate-900 text-white p-4 shadow-md border border-slate-800">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <span className="h-10 w-10 rounded-2xl bg-amber-400 text-slate-950 grid place-items-center text-[18px] font-black shadow">
+                          ⏱
+                        </span>
                         <div>
-                          <p className="text-[12px] font-bold">{r.userName || 'Karyawan'} • {formatTanggalIndo(r.tanggal)}</p>
-                          <p className="text-[11px] text-slate-500 mt-1">
-                            {r.lemburMulai} - {r.lemburSelesai} ({formatDurasi(dur)}) • {r.lemburAlasan || 'Tanpa keterangan'}
+                          <h3 className="text-[14px] font-black text-white leading-tight">Rekapan Data Lembur Karyawan</h3>
+                          <p className="text-[10px] text-white/60 mt-0.5">
+                            Total {overtimeList.length} pengajuan lembur tercatat dari seluruh staf Wigata
                           </p>
                         </div>
-                        <div className="text-right">
-                          <span className="px-3 py-1.5 rounded-full bg-slate-900 text-white text-[12px] font-bold">
-                            {formatDurasi(dur)}
-                          </span>
-                        </div>
                       </div>
-                    );
-                  })}
+                      <span className="px-2.5 py-1 rounded-full bg-amber-400 text-slate-950 text-[10px] font-black shrink-0">
+                        👑 Admin
+                      </span>
+                    </div>
 
-                  {overtimeList.length === 0 && (
-                    <p className="text-center text-[12px] text-slate-400 py-10">Belum ada catatan lembur</p>
-                  )}
+                    <div className="mt-4 grid grid-cols-2 gap-2 text-center">
+                      <div className="rounded-2xl bg-white/10 p-2.5">
+                        <p className="text-[9px] uppercase font-bold text-white/50">Total Jam Lembur</p>
+                        <p className="text-[14px] font-black text-amber-300 mt-0.5">
+                          {formatDurasi(statistik.totalLembur)}
+                        </p>
+                      </div>
+                      <div className="rounded-2xl bg-white/10 p-2.5">
+                        <p className="text-[9px] uppercase font-bold text-white/50">Sesi Lembur Karyawan</p>
+                        <p className="text-[14px] font-black text-white mt-0.5">
+                          {overtimeList.length} sesi
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions & Search */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleExportLemburCSV}
+                      className="flex-1 h-10 rounded-2xl bg-white border border-slate-200 text-slate-800 font-bold text-[11px] flex items-center justify-center gap-1.5 shadow-sm active:scale-95 transition"
+                    >
+                      <span>📥 Export Lembur (CSV)</span>
+                    </button>
+                    <button
+                      onClick={handleSalinLembur}
+                      className="flex-1 h-10 rounded-2xl bg-white border border-slate-200 text-slate-800 font-bold text-[11px] flex items-center justify-center gap-1.5 shadow-sm active:scale-95 transition"
+                    >
+                      <span>📋 Salin Ringkasan</span>
+                    </button>
+                  </div>
+
+                  <div className="relative">
+                    <input
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Cari nama karyawan atau pekerjaan lembur..."
+                      className="h-10 w-full rounded-2xl border border-slate-200 bg-white pl-9 pr-3 text-[12px] focus:outline-none focus:ring-2 focus:ring-indigo-100 shadow-sm"
+                    />
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-[13px]">⌕</span>
+                  </div>
+
+                  {/* Overtime List */}
+                  <div className="space-y-3">
+                    {overtimeList.map((r) => {
+                      const dur = hitungSelisihMenit(r.lemburMulai, r.lemburSelesai);
+                      return (
+                        <div
+                          key={r.id}
+                          className="rounded-[22px] bg-white border border-slate-200/80 shadow-[0_6px_20px_rgba(0,0,0,0.04)] p-4 transition"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="h-10 w-10 rounded-2xl bg-amber-500 text-slate-950 grid place-items-center font-black text-[13px] shrink-0 shadow-sm">
+                                {r.userName ? r.userName[0].toUpperCase() : 'K'}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <p className="text-[13px] font-bold text-slate-900 truncate">
+                                    {r.userName || 'Karyawan'}
+                                  </p>
+                                  {r.jabatan && (
+                                    <span className="bg-indigo-50 text-indigo-700 text-[9px] font-bold px-2 py-0.5 rounded-full border border-indigo-100">
+                                      {r.jabatan}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-slate-500 mt-0.5">
+                                  {formatTanggalIndo(r.tanggal)} {r.nik ? `• ${r.nik}` : ''}
+                                </p>
+                              </div>
+                            </div>
+
+                            <span className="px-3 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-200 text-[12px] font-black shrink-0">
+                              {formatDurasi(dur)}
+                            </span>
+                          </div>
+
+                          <div className="mt-3 bg-slate-50 rounded-xl p-2.5 border border-slate-100 text-[11px]">
+                            <div className="flex justify-between font-mono text-slate-700 font-bold mb-1">
+                              <span>Jam Lembur:</span>
+                              <span className="text-amber-800">{r.lemburMulai} - {r.lemburSelesai}</span>
+                            </div>
+                            <p className="text-slate-600">
+                              <strong className="text-slate-700">Tugas / Catatan: </strong>
+                              {r.lemburAlasan || 'Tanpa keterangan pekerjaan'}
+                            </p>
+                          </div>
+
+                          <div className="mt-3 flex gap-2">
+                            <button
+                              onClick={() => setEditingRecord(r)}
+                              className="flex-1 h-9 rounded-xl bg-white border border-slate-200 text-[11px] font-bold active:scale-[0.98] transition hover:bg-slate-50"
+                            >
+                              Edit Jam
+                            </button>
+                            <button
+                              onClick={() => handleHapusLembur(r)}
+                              className="h-9 px-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-600 text-[11px] font-bold active:scale-[0.98] transition hover:bg-rose-100"
+                            >
+                              Hapus
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {overtimeList.length === 0 && (
+                      <div className="py-12 text-center text-slate-400 text-[13px]">
+                        Belum ada data pengajuan lembur dari karyawan
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                /* FORM AJUKAN LEMBUR (Khusus Akun Karyawan) */
+                <div className="space-y-4">
+                  <div className="rounded-[26px] bg-white border border-slate-200 shadow-sm p-5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-[14px] font-bold">Form Pengajuan Lembur</h3>
+                      <span className="text-[11px] px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100 font-bold">
+                        Durasi: {formatDurasi(durasiLemburInput)}
+                      </span>
+                    </div>
+
+                    <div className="mt-5 space-y-4">
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="block">
+                          <span className="text-[12px] font-semibold text-slate-700">Mulai Lembur</span>
+                          <input
+                            type="time"
+                            value={lemburMulai}
+                            onChange={(e) => setLemburMulai(e.target.value)}
+                            className="mt-2 w-full h-[56px] rounded-2xl border border-slate-200 bg-slate-50 px-4 text-[16px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="text-[12px] font-semibold text-slate-700">Selesai Lembur</span>
+                          <input
+                            type="time"
+                            value={lemburSelesai}
+                            onChange={(e) => setLemburSelesai(e.target.value)}
+                            className="mt-2 w-full h-[56px] rounded-2xl border border-slate-200 bg-slate-50 px-4 text-[16px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="rounded-2xl bg-indigo-50 border border-indigo-100 px-4 py-3 flex items-center justify-between">
+                        <span className="text-[12px] font-semibold text-indigo-700">Total Durasi Lembur</span>
+                        <span className="text-[14px] font-black text-indigo-900">
+                          {formatDurasi(durasiLemburInput)} ({durasiLemburInput} menit)
+                        </span>
+                      </div>
+
+                      <label className="block">
+                        <span className="text-[12px] font-semibold text-slate-700">Alasan / Pekerjaan Lembur</span>
+                        <input
+                          value={lemburAlasan}
+                          onChange={(e) => setLemburAlasan(e.target.value)}
+                          placeholder="Contoh: Cetak spanduk pilkada pesanan kilat"
+                          className="mt-2 w-full h-[56px] rounded-2xl border border-slate-200 bg-white px-4 text-[14px] focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                        />
+                      </label>
+
+                      <button
+                        onClick={handleAjukanLembur}
+                        className="w-full h-[56px] rounded-2xl bg-slate-900 text-white text-[14px] font-black tracking-wide shadow-lg active:scale-[0.98] transition"
+                      >
+                        Simpan Pengajuan Lembur
+                      </button>
+
+                      {todayRecord?.lemburMulai && (
+                        <div className="rounded-2xl bg-slate-50 border border-slate-200 px-4 py-3 text-[12px] text-slate-600">
+                          Lembur Anda hari ini: <span className="font-bold">{todayRecord.lemburMulai} - {todayRecord.lemburSelesai}</span> ({formatDurasi(hitungSelisihMenit(todayRecord.lemburMulai, todayRecord.lemburSelesai))})
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-[13px] font-bold px-1">Daftar Lembur Tersimpan</h4>
+                    <div className="mt-3 space-y-3">
+                      {overtimeList.map((r) => {
+                        const dur = hitungSelisihMenit(r.lemburMulai, r.lemburSelesai);
+                        return (
+                          <div
+                            key={r.id}
+                            className="rounded-[20px] bg-white border border-slate-200 p-4 flex items-center justify-between"
+                          >
+                            <div>
+                              <p className="text-[12px] font-bold">{r.userName || 'Karyawan'} • {formatTanggalIndo(r.tanggal)}</p>
+                              <p className="text-[11px] text-slate-500 mt-1">
+                                {r.lemburMulai} - {r.lemburSelesai} ({formatDurasi(dur)}) • {r.lemburAlasan || 'Tanpa keterangan'}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <span className="px-3 py-1.5 rounded-full bg-slate-900 text-white text-[12px] font-bold">
+                                {formatDurasi(dur)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      {overtimeList.length === 0 && (
+                        <p className="text-center text-[12px] text-slate-400 py-10">Belum ada catatan lembur</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* TAB 4: PROFIL (DATA DIRI KARYAWAN & ALAMAT LOKASI) */}
-          {activeTab === 'profil' && (
+          {/* TAB 4: PROFIL (ATAU PENGATURAN & TIM UNTUK ADMIN) */}
+          {effectiveTab === 'profil' && (
             <div className="space-y-4 pt-1">
-              
-              {/* Form Data Diri Karyawan */}
-              <div className="rounded-[28px] bg-white border border-slate-200 shadow-sm p-5">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                  <div className="flex items-center gap-3">
-                    <div className="h-12 w-12 rounded-full bg-gradient-to-br from-indigo-600 to-blue-500 grid place-items-center text-white text-[20px] font-black shadow-md">
-                      {userProfile.namaLengkap ? userProfile.namaLengkap[0].toUpperCase() : 'K'}
+              {isAdmin ? (
+                /* PANEL PENGATURAN & TIM KHUSUS ADMIN */
+                <div className="space-y-4">
+                  {/* Admin Info Card */}
+                  <div className="rounded-[28px] bg-gradient-to-br from-slate-900 via-slate-900 to-slate-800 text-white p-5 shadow-lg border border-slate-700">
+                    <div className="flex items-center gap-3.5">
+                      <div className="h-12 w-12 rounded-2xl bg-amber-400 text-slate-950 grid place-items-center text-[22px] font-black shadow-md shrink-0">
+                        👑
+                      </div>
+                      <div>
+                        <h3 className="text-[15px] font-black text-white">Administrator Wigata</h3>
+                        <p className="text-[11px] text-white/70">{currentUser?.email || 'admin (Akun Pengelola)'}</p>
+                        <p className="text-[10px] text-amber-300 font-semibold mt-0.5">Hak Akses Penuh: Kelola Absensi & Lembur</p>
+                      </div>
                     </div>
-                    <div>
-                      <h3 className="text-[15px] font-bold text-slate-900">Data Diri Karyawan</h3>
-                      <p className="text-[11px] text-slate-500">Lengkapi data diri untuk pencatatan absensi</p>
+
+                    <div className="mt-4 pt-3 border-t border-white/10 grid grid-cols-2 gap-2 text-center text-[11px]">
+                      <div className="bg-white/5 rounded-xl p-2">
+                        <span className="text-white/50 block text-[9px] uppercase">Jam Shift Kantor</span>
+                        <span className="font-bold text-white">{settings.jamMasuk} - {settings.jamPulang}</span>
+                      </div>
+                      <div className="bg-white/5 rounded-xl p-2">
+                        <span className="text-white/50 block text-[9px] uppercase">Toleransi</span>
+                        <span className="font-bold text-white">{settings.toleransi} menit</span>
+                      </div>
                     </div>
+                  </div>
+
+                  {/* Settings Action List for Admin */}
+                  <div className="rounded-[24px] bg-white border border-slate-200 shadow-sm p-2">
+                    {[
+                      {
+                        label: '⚙️ Aturan Jam Kerja & Shift',
+                        sub: `Jam masuk: ${settings.jamMasuk} • Pulang: ${settings.jamPulang} • Toleransi: ${settings.toleransi}m`,
+                        action: () => setShowSettingsModal(true),
+                        highlight: true,
+                      },
+                      {
+                        label: '📲 Bagikan Aplikasi ke HP Karyawan',
+                        sub: 'Kirim link WhatsApp & cara pasang jadi ikon di HP staf',
+                        action: () => setShowShareModal(true),
+                      },
+                      {
+                        label: '📥 Export Rekapan Absensi (CSV)',
+                        sub: 'Unduh file Excel/CSV riwayat masuk & pulang',
+                        action: handleExportCSV,
+                      },
+                      {
+                        label: '📥 Export Rekapan Lembur (CSV)',
+                        sub: 'Unduh file Excel/CSV data pengajuan lembur',
+                        action: handleExportLemburCSV,
+                      },
+                      {
+                        label: '📋 Salin Ringkasan Laporan Teks',
+                        sub: 'Format teks untuk chat WhatsApp pengurus',
+                        action: handleSalinLaporan,
+                      },
+                      {
+                        label: '🚪 Keluar dari Mode Admin',
+                        sub: 'Kembali ke tampilan pengguna umum',
+                        action: handleAdminLogout,
+                        danger: true,
+                      },
+                    ].map((item) => (
+                      <button
+                        key={item.label}
+                        onClick={item.action}
+                        className={`w-full min-h-[60px] flex items-center justify-between px-4 py-2 rounded-2xl text-left active:scale-[0.99] transition ${
+                          (item as any).danger
+                            ? 'hover:bg-rose-50 text-rose-600'
+                            : (item as any).highlight
+                            ? 'bg-amber-50/70 hover:bg-amber-50 text-amber-950'
+                            : 'hover:bg-slate-50 text-slate-900'
+                        }`}
+                      >
+                        <div>
+                          <p className={`text-[12px] font-bold ${(item as any).danger ? 'text-rose-600' : (item as any).highlight ? 'text-amber-950' : 'text-slate-900'}`}>
+                            {item.label}
+                          </p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">{item.sub}</p>
+                        </div>
+                        <span className="h-7 w-7 rounded-full bg-slate-100 grid place-items-center text-[12px] text-slate-500 shrink-0">›</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
+              ) : (
+                /* FORM DATA DIRI KHUSUS KARYAWAN */
+                <div className="space-y-4">
+                  {/* Form Data Diri Karyawan */}
+                  <div className="rounded-[28px] bg-white border border-slate-200 shadow-sm p-5">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                      <div className="flex items-center gap-3">
+                        <div className="h-12 w-12 rounded-full bg-gradient-to-br from-indigo-600 to-blue-500 grid place-items-center text-white text-[20px] font-black shadow-md">
+                          {userProfile.namaLengkap ? userProfile.namaLengkap[0].toUpperCase() : 'K'}
+                        </div>
+                        <div>
+                          <h3 className="text-[15px] font-bold text-slate-900">Data Diri Karyawan</h3>
+                          <p className="text-[11px] text-slate-500">Lengkapi data diri untuk pencatatan absensi</p>
+                        </div>
+                      </div>
+                    </div>
 
-                <div className="mt-4 space-y-3.5">
-                  <label className="block">
-                    <span className="text-[11px] font-bold text-slate-600">Nama Lengkap Karyawan *</span>
-                    <input
-                      value={userProfile.namaLengkap}
-                      onChange={(e) => setUserProfile({ ...userProfile, namaLengkap: e.target.value })}
-                      placeholder="Masukkan nama lengkap Anda..."
-                      className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3.5 text-[14px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                    />
-                  </label>
+                    <div className="mt-4 space-y-3.5">
+                      <label className="block">
+                        <span className="text-[11px] font-bold text-slate-600">Nama Lengkap Karyawan *</span>
+                        <input
+                          value={userProfile.namaLengkap}
+                          onChange={(e) => setUserProfile({ ...userProfile, namaLengkap: e.target.value })}
+                          placeholder="Masukkan nama lengkap Anda..."
+                          className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3.5 text-[14px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                        />
+                      </label>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="block">
-                      <span className="text-[11px] font-bold text-slate-600">NIK / ID Karyawan</span>
-                      <input
-                        value={userProfile.nik}
-                        onChange={(e) => setUserProfile({ ...userProfile, nik: e.target.value })}
-                        placeholder="Contoh: WGT-001"
-                        className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                      />
-                    </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <label className="block">
+                          <span className="text-[11px] font-bold text-slate-600">NIK / ID Karyawan</span>
+                          <input
+                            value={userProfile.nik}
+                            onChange={(e) => setUserProfile({ ...userProfile, nik: e.target.value })}
+                            placeholder="Contoh: WGT-001"
+                            className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                          />
+                        </label>
 
-                    <label className="block">
-                      <span className="text-[11px] font-bold text-slate-600">No. WhatsApp / HP</span>
-                      <input
-                        value={userProfile.noHp}
-                        onChange={(e) => setUserProfile({ ...userProfile, noHp: e.target.value })}
-                        placeholder="08xxxxxxxxxx"
-                        className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                      />
-                    </label>
+                        <label className="block">
+                          <span className="text-[11px] font-bold text-slate-600">No. WhatsApp / HP</span>
+                          <input
+                            value={userProfile.noHp}
+                            onChange={(e) => setUserProfile({ ...userProfile, noHp: e.target.value })}
+                            placeholder="08xxxxxxxxxx"
+                            className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                          />
+                        </label>
+                      </div>
+
+                      <label className="block">
+                        <span className="text-[11px] font-bold text-slate-600">Bagian / Divisi Kerja</span>
+                        <select
+                          value={userProfile.jabatan}
+                          onChange={(e) => setUserProfile({ ...userProfile, jabatan: e.target.value })}
+                          className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 text-[13px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                        >
+                          {daftarJabatan.map((j) => (
+                            <option key={j} value={j}>{j}</option>
+                          ))}
+                        </select>
+                      </label>
+
+                      {/* Pengaturan Alamat & Lokasi Karyawan */}
+                      <div className="p-3.5 bg-indigo-50/70 border border-indigo-100 rounded-2xl">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-[11px] font-bold text-indigo-900">Alamat / Lokasi Kerja Karyawan</span>
+                          <button
+                            type="button"
+                            onClick={handleDetectGPS}
+                            className="text-[11px] font-black text-indigo-700 hover:text-indigo-900 flex items-center gap-1 bg-white px-2.5 py-1 rounded-full border border-indigo-200 shadow-sm active:scale-95 transition"
+                          >
+                            <span>📍 Deteksi GPS</span>
+                          </button>
+                        </div>
+
+                        <input
+                          value={userProfile.alamatLokasi}
+                          onChange={(e) => setUserProfile({ ...userProfile, alamatLokasi: e.target.value })}
+                          placeholder="Ketik alamat penempatan atau cabang kerja Anda..."
+                          className="w-full h-11 rounded-xl border border-indigo-200 bg-white px-3 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                        />
+
+                        {/* Quick Location Pills */}
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {lokasiPilihanDefault.map((lok) => (
+                            <button
+                              key={lok}
+                              type="button"
+                              onClick={() => setUserProfile({ ...userProfile, alamatLokasi: lok })}
+                              className={`text-[10px] font-semibold px-2 py-0.5 rounded-lg border transition ${
+                                userProfile.alamatLokasi === lok
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {lok.split('-')[0].trim()}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-slate-500 mt-2">
+                          Alamat ini akan otomatis dicatat sebagai lokasi absen masuk & pulang Anda.
+                        </p>
+                      </div>
+
+                      <button
+                        onClick={handleSaveProfile}
+                        className="w-full h-12 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[13px] shadow-md active:scale-95 transition"
+                      >
+                        Simpan Data Diri ke Cloud
+                      </button>
+                    </div>
                   </div>
 
-                  <label className="block">
-                    <span className="text-[11px] font-bold text-slate-600">Bagian / Divisi Kerja</span>
-                    <select
-                      value={userProfile.jabatan}
-                      onChange={(e) => setUserProfile({ ...userProfile, jabatan: e.target.value })}
-                      className="mt-1.5 w-full h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 text-[13px] font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                    >
-                      {daftarJabatan.map((j) => (
-                        <option key={j} value={j}>{j}</option>
-                      ))}
-                    </select>
-                  </label>
-
-                  {/* Pengaturan Alamat & Lokasi Karyawan */}
-                  <div className="p-3.5 bg-indigo-50/70 border border-indigo-100 rounded-2xl">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-bold text-indigo-900">Alamat / Lokasi Kerja Karyawan</span>
+                  {/* Status Role & Akun */}
+                  <div className="rounded-[24px] bg-white border border-slate-200 shadow-sm p-4">
+                    <p className="text-[12px] font-bold text-slate-900 mb-2">Status Akun & Hak Akses</p>
+                    <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                      <div>
+                        <p className="text-[11px] font-bold">👤 Akun Karyawan</p>
+                        <p className="text-[10px] text-slate-500">
+                          Hanya bisa melihat riwayat pribadi & tidak bisa menghapus data
+                        </p>
+                      </div>
                       <button
-                        type="button"
-                        onClick={handleDetectGPS}
-                        className="text-[11px] font-black text-indigo-700 hover:text-indigo-900 flex items-center gap-1 bg-white px-2.5 py-1 rounded-full border border-indigo-200 shadow-sm active:scale-95 transition"
+                        onClick={() => setShowAdminLoginModal(true)}
+                        className="px-3 py-1.5 rounded-full bg-slate-900 text-white font-bold text-[10px] active:scale-95 transition"
                       >
-                        <span>📍 Deteksi GPS</span>
+                        Login Admin
                       </button>
                     </div>
 
-                    <input
-                      value={userProfile.alamatLokasi}
-                      onChange={(e) => setUserProfile({ ...userProfile, alamatLokasi: e.target.value })}
-                      placeholder="Ketik alamat penempatan atau cabang kerja Anda..."
-                      className="w-full h-11 rounded-xl border border-indigo-200 bg-white px-3 text-[12px] font-medium focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                    />
-
-                    {/* Quick Location Pills */}
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {lokasiPilihanDefault.map((lok) => (
+                    {currentUser ? (
+                      <div className="mt-3 flex items-center justify-between text-[11px] text-slate-600 pt-2 border-t border-slate-100">
+                        <span>Google: {currentUser.email}</span>
                         <button
-                          key={lok}
-                          type="button"
-                          onClick={() => setUserProfile({ ...userProfile, alamatLokasi: lok })}
-                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-lg border transition ${
-                            userProfile.alamatLokasi === lok
-                              ? 'bg-indigo-600 text-white border-indigo-600'
-                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                          }`}
+                          onClick={handleGoogleLogout}
+                          className="text-rose-600 font-bold hover:underline"
                         >
-                          {lok.split('-')[0].trim()}
+                          Logout Google
                         </button>
-                      ))}
-                    </div>
-                    <p className="text-[10px] text-slate-500 mt-2">
-                      Alamat ini akan otomatis dicatat sebagai lokasi absen masuk & pulang Anda.
-                    </p>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={handleGoogleLogin}
+                        className="mt-3 w-full h-10 rounded-xl bg-slate-100 text-slate-700 font-bold text-[11px] flex items-center justify-center gap-2 hover:bg-slate-200 transition"
+                      >
+                        <span>Hubungkan dengan Akun Google</span>
+                      </button>
+                    )}
                   </div>
 
-                  <button
-                    onClick={handleSaveProfile}
-                    className="w-full h-12 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[13px] shadow-md active:scale-95 transition"
-                  >
-                    Simpan Data Diri ke Cloud
-                  </button>
+                  {/* Menu Tambahan untuk Karyawan */}
+                  <div className="rounded-[24px] bg-white border border-slate-200 shadow-sm p-2">
+                    {[
+                      {
+                        label: '📲 Bagikan Aplikasi ke HP Rekan',
+                        sub: 'Kirim link WhatsApp & cara pasang di layar HP',
+                        action: () => setShowShareModal(true),
+                        highlight: true,
+                      },
+                      {
+                        label: '📥 Export Riwayat Saya (CSV)',
+                        sub: 'Download backup arsip absensi pribadi',
+                        action: handleExportCSV,
+                      },
+                    ].map((item) => (
+                      <button
+                        key={item.label}
+                        onClick={item.action}
+                        className={`w-full h-[60px] flex items-center justify-between px-4 rounded-2xl text-left active:scale-[0.99] transition ${
+                          item.highlight ? 'bg-indigo-50/70 hover:bg-indigo-50' : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <div>
+                          <p className={`text-[12px] font-bold ${item.highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
+                            {item.label}
+                          </p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">{item.sub}</p>
+                        </div>
+                        <span className="h-7 w-7 rounded-full bg-slate-100 grid place-items-center text-[12px] text-slate-500">›</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
-
-              {/* Status Role & Akun */}
-              <div className="rounded-[24px] bg-white border border-slate-200 shadow-sm p-4">
-                <p className="text-[12px] font-bold text-slate-900 mb-2">Status Akun & Hak Akses</p>
-                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between">
-                  <div>
-                    <p className="text-[11px] font-bold">
-                      {isAdmin ? '👑 Akses Admin Aktif' : '👤 Akses Karyawan Biasa'}
-                    </p>
-                    <p className="text-[10px] text-slate-500">
-                      {isAdmin ? 'Bisa lihat semua karyawan, ubah jam, & hapus data' : 'Hanya bisa melihat riwayat pribadi & tidak bisa menghapus'}
-                    </p>
-                  </div>
-                  {isAdmin ? (
-                    <button
-                      onClick={handleAdminLogout}
-                      className="px-3 py-1.5 rounded-full bg-rose-50 border border-rose-200 text-rose-600 font-bold text-[10px] active:scale-95 transition"
-                    >
-                      Keluar Admin
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => setShowAdminLoginModal(true)}
-                      className="px-3 py-1.5 rounded-full bg-slate-900 text-white font-bold text-[10px] active:scale-95 transition"
-                    >
-                      Login Admin
-                    </button>
-                  )}
-                </div>
-
-                {currentUser ? (
-                  <div className="mt-3 flex items-center justify-between text-[11px] text-slate-600 pt-2 border-t border-slate-100">
-                    <span>Google: {currentUser.email}</span>
-                    <button
-                      onClick={handleGoogleLogout}
-                      className="text-rose-600 font-bold hover:underline"
-                    >
-                      Logout Google
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleGoogleLogin}
-                    className="mt-3 w-full h-10 rounded-xl bg-slate-100 text-slate-700 font-bold text-[11px] flex items-center justify-center gap-2 hover:bg-slate-200 transition"
-                  >
-                    <span>Hubungkan dengan Akun Google</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Menu Tambahan */}
-              <div className="rounded-[24px] bg-white border border-slate-200 shadow-sm p-2">
-                {[
-                  {
-                    label: '📲 Bagikan Aplikasi ke HP Karyawan',
-                    sub: 'Kirim link WhatsApp & cara pasang di layar HP',
-                    action: () => setShowShareModal(true),
-                    highlight: true,
-                  },
-                  ...(isAdmin
-                    ? [
-                        {
-                          label: '⚙️ Aturan Jam Kerja & Shift (Admin)',
-                          sub: `${settings.jamMasuk} - ${settings.jamPulang} • Toleransi ${settings.toleransi}m`,
-                          action: () => setShowSettingsModal(true),
-                        },
-                      ]
-                    : []),
-                  {
-                    label: '📥 Export Rekapan CSV',
-                    sub: 'Download file rekapan data absensi',
-                    action: handleExportCSV,
-                  },
-                  {
-                    label: '📋 Salin Ringkasan Teks',
-                    sub: 'Format teks untuk WhatsApp pengurus kantor',
-                    action: handleSalinLaporan,
-                  },
-                ].map((item) => (
-                  <button
-                    key={item.label}
-                    onClick={item.action}
-                    className={`w-full h-[60px] flex items-center justify-between px-4 rounded-2xl text-left active:scale-[0.99] transition ${
-                      item.highlight ? 'bg-indigo-50/70 hover:bg-indigo-50' : 'hover:bg-slate-50'
-                    }`}
-                  >
-                    <div>
-                      <p className={`text-[12px] font-bold ${item.highlight ? 'text-indigo-900' : 'text-slate-900'}`}>
-                        {item.label}
-                      </p>
-                      <p className="text-[10px] text-slate-500 mt-0.5">{item.sub}</p>
-                    </div>
-                    <span className="h-7 w-7 rounded-full bg-slate-100 grid place-items-center text-[12px] text-slate-500">›</span>
-                  </button>
-                ))}
-              </div>
+              )}
             </div>
           )}
         </main>
 
-        {/* Bottom Tab Bar (Fixed 4 Tabs) */}
+        {/* Bottom Tab Bar (3 Tabs for Admin, 4 Tabs for Employee) */}
         <div className="absolute bottom-0 left-0 right-0 z-30">
           <div className="mx-auto max-w-[430px] bg-white/95 backdrop-blur-xl border-t border-slate-200 px-2 pt-2 pb-[calc(8px+env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(0,0,0,0.06)] rounded-t-[28px] md:rounded-b-[40px]">
-            <div className="grid grid-cols-4 gap-1">
-              {[
-                { id: 'beranda', label: 'Beranda', icon: '⌂' },
-                { id: 'riwayat', label: 'Riwayat', icon: '☰' },
-                { id: 'lembur', label: 'Lembur', icon: '◷' },
-                { id: 'profil', label: 'Profil Saya', icon: '◍' },
-              ].map((tab) => {
-                const isActive = activeTab === tab.id;
+            <div className={`grid ${isAdmin ? 'grid-cols-3' : 'grid-cols-4'} gap-1.5`}>
+              {(isAdmin
+                ? [
+                    { id: 'riwayat', label: 'Rekap Absen', icon: '📋' },
+                    { id: 'lembur', label: 'Rekap Lembur', icon: '⏱' },
+                    { id: 'profil', label: 'Pengaturan Admin', icon: '⚙' },
+                  ]
+                : [
+                    { id: 'beranda', label: 'Beranda', icon: '⌂' },
+                    { id: 'riwayat', label: 'Riwayat Saya', icon: '☰' },
+                    { id: 'lembur', label: 'Lembur', icon: '◷' },
+                    { id: 'profil', label: 'Profil Saya', icon: '◍' },
+                  ]
+              ).map((tab) => {
+                const isActive = effectiveTab === tab.id;
                 return (
                   <button
                     key={tab.id}
@@ -1640,7 +1996,33 @@ export default function App() {
                 </p>
               </div>
 
-              <form onSubmit={handleAdminLoginSubmit} className="mt-4 space-y-3">
+              {/* Tombol Cepat: Masuk dengan Google wigatadigitalprint@gmail.com */}
+              <div className="mt-4">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setShowAdminLoginModal(false);
+                    await handleGoogleLogin();
+                  }}
+                  className="w-full h-11 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-800 font-bold text-[12px] flex items-center justify-center gap-2 shadow-sm transition active:scale-95"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                  </svg>
+                  <span>Masuk Akun Google Admin</span>
+                </button>
+
+                <div className="flex items-center my-3 gap-2">
+                  <div className="h-px bg-slate-200 flex-1" />
+                  <span className="text-[10px] text-slate-400 font-bold uppercase">atau login manual</span>
+                  <div className="h-px bg-slate-200 flex-1" />
+                </div>
+              </div>
+
+              <form onSubmit={handleAdminLoginSubmit} className="space-y-3">
                 <label className="block">
                   <span className="text-[11px] font-bold text-slate-600">Username Admin</span>
                   <input
